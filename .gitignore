@@ -2,3 +2,7 @@ __pycache__/
 *.pyc
 .DS_Store
 /tmp/
+/copy
+test.png
+/.zellij-send/
+triple-ocr-agy-migration-instructions.md

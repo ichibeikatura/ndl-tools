@@ -1,7 +1,12 @@
-"""Gemini CLI による三系統OCR統合校正"""
+"""agy（Antigravity CLI）による三系統OCR統合校正（Gemini API フォールバック付き）"""
 
+import os
 import subprocess
+import sys
 
+
+MODEL_AGY = "Gemini 3.1 Pro (High)"  # agy 主経路
+# API フォールバックは gemini-2.5-flash（_integrate_via_api 内で指定）
 
 PROMPT_TEMPLATE = """\
 以下は、同一の近代日本語資料画像に対して三種類のOCRエンジンを実行した結果です。
@@ -29,28 +34,77 @@ PROMPT_TEMPLATE = """\
 """
 
 
-def integrate(
-    vision_text: str,
-    google_text: str,
-    ndlocr_text: str,
-    biblio: str = "",
-) -> str:
-    """3つのOCR結果をGemini CLIで統合校正する"""
-    prompt = PROMPT_TEMPLATE.format(
+def _build_prompt(vision_text: str, google_text: str, ndlocr_text: str, biblio: str) -> str:
+    return PROMPT_TEMPLATE.format(
         biblio=biblio or "（取得できませんでした）",
         vision=vision_text or "（失敗）",
         google=google_text or "（失敗）",
         ndlocr=ndlocr_text or "（失敗）",
     )
 
+
+def _find_agy() -> str:
+    """GUIアプリ起動時はPATHが制限されるため、既知の場所も含めて探す"""
+    search_dirs = os.environ.get("PATH", "").split(":") + [
+        os.path.expanduser("~/.local/bin"),
+        "/usr/local/bin",
+        "/opt/homebrew/bin",
+    ]
+    for d in search_dirs:
+        candidate = os.path.join(d, "agy")
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    raise RuntimeError("agy コマンドが見つかりません（PATH を確認してください）")
+
+
+def _integrate_via_agy(prompt: str) -> str:
+    agy_cmd = _find_agy()
+    env = os.environ.copy()
+    env["PATH"] = ":".join([
+        os.path.expanduser("~/.local/bin"),
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        env.get("PATH", ""),
+    ])
+    # agy は -p（print）モードでもプロンプトを引数で受け取りつつ、stdout を
+    # 出力する前に stdin の EOF を待つ。stdin を継承したまま（TTY やパイプが
+    # 開いたまま）だと EOF が来ず agy がハングするため、明示的に閉じる。
     result = subprocess.run(
-        ["gemini", "-m", "gemini-2.5-pro", "-o", "text"],
-        input=prompt,
+        [agy_cmd, "--model", MODEL_AGY, "-p", prompt],
         capture_output=True,
         text=True,
-        timeout=180,
+        env=env,
+        timeout=120,
+        stdin=subprocess.DEVNULL,
     )
-    if result.returncode != 0:
-        raise RuntimeError(f"gemini failed: {result.stderr}")
-
+    if result.returncode != 0 or not result.stdout.strip():
+        raise RuntimeError(f"agy エラー (code={result.returncode}): {result.stderr.strip()}")
     return result.stdout.strip()
+
+
+def _integrate_via_api(prompt: str) -> str:
+    import google.generativeai as genai
+
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("環境変数 GEMINI_API_KEY が設定されていません")
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel("gemini-2.5-flash")
+    response = model.generate_content(prompt)
+    return response.text.strip()
+
+
+def integrate(
+    vision_text: str,
+    google_text: str,
+    ndlocr_text: str,
+    biblio: str = "",
+) -> str:
+    """3つのOCR結果をagy CLIで統合校正する。失敗時はGemini APIにフォールバック"""
+    prompt = _build_prompt(vision_text, google_text, ndlocr_text, biblio)
+
+    try:
+        return _integrate_via_agy(prompt)
+    except Exception as e:
+        print(f"[警告] agy 失敗 ({e.__class__.__name__}: {e})、Gemini API にフォールバックします", file=sys.stderr)
+        return _integrate_via_api(prompt)

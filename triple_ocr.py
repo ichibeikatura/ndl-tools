@@ -5,9 +5,12 @@ import argparse
 import os
 import subprocess
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
+
+import rumps
 
 import biblio as biblio_mod
 import integrator
@@ -17,6 +20,36 @@ import ocr_vision
 
 # ログファイルのデフォルトパス。環境変数 TRIPLE_OCR_LOG で上書き可能。
 DEFAULT_LOG = Path.home() / "My Drive" / "memo" / "triple-ocr.txt"
+
+
+class Countdown:
+    """メニューバーにカウントダウンを表示して処理進捗を示す。"""
+
+    def __init__(self, start: int = 10):
+        self._n = start
+        self._lock = threading.Lock()
+        self._app = rumps.App(str(start), quit_button=None)
+
+    def run_on_main_thread(self):
+        """メインスレッドで呼ぶ（ブロッキング）。処理はデーモンスレッドで動かすこと。"""
+        self._app.run()
+
+    def tick(self):
+        """カウントを1減らしてタイトルを更新する。0以下になったら終了。"""
+        with self._lock:
+            self._n -= 1
+            n = self._n
+        self._app.title = str(max(n, 0))
+        if n <= 0:
+            rumps.quit_application()
+
+    def done(self):
+        """処理完了時にメニューバーを即座に消す。"""
+        rumps.quit_application()
+
+
+# 処理中のカウントダウンインスタンス（__main__ 起動時に設定される）
+_countdown: Countdown | None = None
 
 
 def eprint(*args, **kwargs):
@@ -54,6 +87,8 @@ def run_ocr(image_path: str) -> dict[str, str]:
             except Exception as e:
                 eprint(f"[OCR] {name}: 失敗 — {e}")
                 results[name] = ""
+            if _countdown:
+                _countdown.tick()
 
     return results
 
@@ -70,11 +105,15 @@ def get_biblio_and_page() -> tuple[str, str, str]:
             eprint("[書誌] NDLデジコレのURLが見つかりませんでした。")
             return "", url, ""
         eprint(f"[書誌] PID={pid} で取得中…")
+        if _countdown:
+            _countdown.tick()  # 書誌取得開始
         text = biblio_mod.get_biblio_text(pid)
         if text:
             eprint(f"[書誌] 取得完了: {text}")
         else:
             eprint("[書誌] 書誌情報が取得できませんでした。")
+        if _countdown:
+            _countdown.tick()  # 書誌取得完了
         return text, url, page
     except Exception as e:
         eprint(f"[書誌] エラー: {e}")
@@ -120,7 +159,7 @@ def main():
     parser.add_argument("--no-biblio", action="store_true", help="書誌情報の取得をスキップ")
     parser.add_argument("--no-clipboard", action="store_true", help="クリップボードへのコピーをスキップ")
     parser.add_argument("--no-log", action="store_true", help="ログファイルへの保存をスキップ")
-    parser.add_argument("--ocr-only", action="store_true", help="OCR結果のみ表示（Gemini統合をスキップ）")
+    parser.add_argument("--ocr-only", action="store_true", help="OCR結果のみ表示（agy統合をスキップ）")
     args = parser.parse_args()
 
     log_path = Path(os.environ.get("TRIPLE_OCR_LOG", str(DEFAULT_LOG))).expanduser()
@@ -133,6 +172,8 @@ def main():
         eprint("[撮影] 範囲を選択してください…")
         image_path = str(take_screenshot())
         eprint(f"[撮影] 保存: {image_path}")
+        if _countdown:
+            _countdown.tick()  # 9: 撮影保存完了
 
     # 2. 書誌情報取得（並列化のため先にスレッドへ投げる）
     with ThreadPoolExecutor(max_workers=1) as biblio_executor:
@@ -140,6 +181,8 @@ def main():
 
         # 3. OCR並列実行
         eprint("[OCR] 三系統を並列実行中…")
+        if _countdown:
+            _countdown.tick()  # 8: OCR並列実行開始
         ocr_results = run_ocr(image_path)
 
         biblio_text, ndl_url, page = "", "", ""
@@ -155,6 +198,8 @@ def main():
         eprint("[エラー] 全OCRエンジンが失敗しました。")
         sys.exit(1)
     eprint(f"[OCR] 成功: {', '.join(successful)}")
+    if _countdown:
+        _countdown.tick()  # 2: OCR成功判定
 
     # 5. --ocr-only モード
     if args.ocr_only:
@@ -164,8 +209,10 @@ def main():
             output_parts.append(f"## {label}\n{text or '（失敗）'}")
         result_text = "\n\n".join(output_parts)
     else:
-        # 6. Gemini統合
-        eprint("[Gemini] 統合校正中…")
+        # 6. agy統合
+        eprint("[校正] agy で統合中…")
+        if _countdown:
+            _countdown.tick()  # 1: agy統合校正中
         try:
             result_text = integrator.integrate(
                 vision_text=ocr_results.get("vision", ""),
@@ -173,9 +220,9 @@ def main():
                 ndlocr_text=ocr_results.get("ndlocr", ""),
                 biblio=biblio_text,
             )
-            eprint("[Gemini] 完了")
+            eprint("[校正] 完了")
         except Exception as e:
-            eprint(f"[Gemini] 失敗: {e} — OCR結果をそのまま表示します")
+            eprint(f"[校正] 失敗: {e} — OCR結果をそのまま表示します")
             output_parts = []
             for name, label in [("vision", "macOS Vision"), ("google", "Google Cloud Vision"), ("ndlocr", "NDLOCR-Lite")]:
                 text = ocr_results.get(name, "")
@@ -205,4 +252,14 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    _countdown = Countdown(10)
+
+    def _worker():
+        try:
+            main()
+        finally:
+            _countdown.done()
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    _countdown.run_on_main_thread()  # Cocoa ランループはメインスレッドで動かす
