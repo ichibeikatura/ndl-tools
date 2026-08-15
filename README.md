@@ -246,12 +246,16 @@ ns 八月二十一日 1940 雑誌    # 1940〜1950年の雑誌のみ
 ## ~/.bin からの利用
 
 `~/.bin` は PATH に入っているため、symlink を張るとどこからでも起動できる。
+2026-08-15 に設定済み。
 
 ```bash
 ln -sf ~/Documents/github/ndl-tools/bin/ndl.py     ~/.bin/ndl.py
 ln -sf ~/Documents/github/ndl-tools/bin/preview.py ~/.bin/preview.py
 ln -sf ~/Documents/github/ndl-tools/bin/ns         ~/.bin/ns
 ```
+
+Karabiner の `Cmd+Shift+P` / `Cmd+Shift+M` は `~/.bin/ndl.py`・`~/.bin/preview.py`
+を最前面アプリ（Safari / Preview）で振り分けて呼ぶ。symlink 経由なのでこのままでよい。
 
 ## 関連リポジトリ
 
