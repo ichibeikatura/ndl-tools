@@ -10,7 +10,6 @@
 | `bin/clean_hashira.py` | OCRテキストから柱（ランニングヘッダ）・ノンブルを除去する |
 | `bin/ndl.py` | Safari で開いている資料の書誌情報・ページ番号を閲覧ログに記録する |
 | `bin/preview.py` | Preview.app で開いている資料の閲覧状況をログに記録する |
-| `bin/ns` | NDLデジコレをキーワード・年代・資料種別で検索してブラウザで開く |
 
 書誌情報の取得（Safari連携・JapanLinkCenter API・NDL SRU API）は `ndl_tools/biblio.py`
 に集約してあり、`triple_ocr.py` と `ndl.py` の両方がこれを使う。
@@ -88,8 +87,7 @@ ndl-tools/
 │   ├── triple_ocr.py     # 三系統OCR統合校正（メイン）
 │   ├── clean_hashira.py  # 柱（ランニングヘッダ）・ノンブルの除去
 │   ├── ndl.py            # NDLデジコレ閲覧ログ記録
-│   ├── preview.py        # Preview.app 閲覧ログ記録
-│   └── ns                # NDLデジコレ検索
+│   └── preview.py        # Preview.app 閲覧ログ記録
 └── ndl_tools/            # 共有ライブラリ
     ├── biblio.py         # 書誌情報取得（Safari連携 / JLC / NDL SRU）
     ├── integrator.py     # agy 統合校正（Gemini API フォールバック付き）
@@ -235,14 +233,6 @@ python3 bin/preview.py --page
 python3 bin/preview.py --full
 ```
 
-### ns — NDLデジコレ検索
-
-```bash
-ns 八月二十一日              # 全コレクション検索
-ns 八月二十一日 1940         # 1940〜1950年に絞り込み
-ns 八月二十一日 1940 雑誌    # 1940〜1950年の雑誌のみ
-```
-
 ## ~/.bin からの利用
 
 `~/.bin` は PATH に入っているため、symlink を張るとどこからでも起動できる。
@@ -251,7 +241,6 @@ ns 八月二十一日 1940 雑誌    # 1940〜1950年の雑誌のみ
 ```bash
 ln -sf ~/Documents/github/ndl-tools/bin/ndl.py     ~/.bin/ndl.py
 ln -sf ~/Documents/github/ndl-tools/bin/preview.py ~/.bin/preview.py
-ln -sf ~/Documents/github/ndl-tools/bin/ns         ~/.bin/ns
 ```
 
 Karabiner の `Cmd+Shift+P` / `Cmd+Shift+M` は `~/.bin/ndl.py`・`~/.bin/preview.py`
