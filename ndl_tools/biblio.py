@@ -1,12 +1,21 @@
-"""書誌情報取得モジュール（ndl.py から移植）"""
+"""NDLデジタルコレクションの書誌情報取得モジュール。
+
+bin/ndl.py と bin/triple_ocr.py の共通基盤。もとは ndl.py 内に直接あったものを
+triple-ocr が複製し、両者が分岐していたため統合した（User-Agent・SRUリトライは
+ndl.py 側、各種 timeout と Preview/frontmost 連携は triple-ocr 側の実装を採る）。
+"""
 
 import html
 import json
 import re
 import subprocess
+import time
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+
+# NDL / JapanLinkCenter は既定の urllib User-Agent に応答しないことがあるため明示する。
+_UA = "Mozilla/5.0"
 
 # === 元号データ ===
 ERAS = [
@@ -21,10 +30,12 @@ KANJI_DIGITS = "〇一二三四五六七八九"
 
 
 def to_kanji_number(n: int) -> str:
+    """アラビア数字を漢数字に変換（桁表記なし、単純置換）"""
     return "".join(KANJI_DIGITS[int(d)] for d in str(n))
 
 
 def convert_year(year: int) -> str:
+    """西暦を和暦表記に変換: 明治三四(一九〇一)年 1901"""
     era_name = None
     era_year = None
     for i, (start, name) in enumerate(ERAS):
@@ -45,8 +56,59 @@ def convert_year(year: int) -> str:
     return f"{era_name}{era_year_kanji}({year_kanji})年 {year}"
 
 
+# === フロントアプリ判定 ===
+def get_frontmost_app() -> str:
+    """最前面アプリの bundle identifier を返す。失敗時は空文字。"""
+    result = subprocess.run(
+        [
+            "osascript",
+            "-e", 'tell application "System Events" to set p to first application process whose frontmost is true',
+            "-e", "return bundle identifier of p",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    return result.stdout.strip()
+
+
+# === Preview連携 ===
+# AXDocument 属性経由でファイルパスを取得する（Preview のスクリプト辞書に
+# document クラスの応答が無くても動く。~/.bin/preview.py と同方式）。
+_PREVIEW_DOC_SCRIPT = """
+tell application "System Events"
+    tell process "Preview"
+        set thefile to value of attribute "AXDocument" of window 1
+    end tell
+end tell
+return thefile
+"""
+
+
+def get_preview_file_path() -> str:
+    """Preview.app の最前面ウィンドウで開いているファイルのフルパスを返す。失敗時は空文字。
+
+    アクセシビリティ許可がない等の実行エラー時は RuntimeError を送出する。
+    """
+    result = subprocess.run(
+        ["osascript", "-e", _PREVIEW_DOC_SCRIPT],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "osascript failed")
+    raw = result.stdout.strip()
+    if not raw or raw == "missing value":
+        return ""
+    if raw.startswith("file://"):
+        raw = raw[7:]
+    return urllib.parse.unquote(raw)
+
+
 # === Safari連携 ===
 def get_safari_url() -> str:
+    """Safariの現在のタブのURLを取得"""
     result = subprocess.run(
         ["osascript", "-e", 'tell app "Safari" to get the URL of the current tab of window 1'],
         capture_output=True,
@@ -57,10 +119,12 @@ def get_safari_url() -> str:
 
 
 def normalize_url(url: str) -> str:
+    """lab.ndl.go.jp形式をdl.ndl.go.jp形式に正規化"""
     return url.replace("https://lab.ndl.go.jp/dl/book/", "https://dl.ndl.go.jp/pid/")
 
 
 def extract_pid_and_page(url: str) -> tuple[str, str]:
+    """URLからPIDとページ番号を抽出"""
     normalized = normalize_url(url)
     match = re.search(r"/pid/(\d+)(?:/\d+)?(?:/(\d+))?", normalized)
     if match:
@@ -86,6 +150,7 @@ def _t(prefix: str, local: str) -> str:
 
 
 def _format_author_literal(literal: str) -> str:
+    """'永田, 清, 1903-1957' → '永田 清 (1903-1957)' に変換"""
     parts = [p.strip() for p in literal.split(",")]
     name_parts = []
     year_part = ""
@@ -99,8 +164,11 @@ def _format_author_literal(literal: str) -> str:
 
 
 def fetch_biblio_info(pid: str) -> dict:
+    """JapanLinkCenter APIから書誌情報を取得"""
     url = f"https://japanlinkcenter.org/data/10.11501/{pid}"
-    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    req = urllib.request.Request(
+        url, headers={"Accept": "application/json", "User-Agent": _UA}
+    )
     try:
         with urllib.request.urlopen(req, timeout=15) as response:
             return json.loads(response.read().decode("utf-8"))
@@ -109,6 +177,7 @@ def fetch_biblio_info(pid: str) -> dict:
 
 
 def format_biblio_info(data: dict) -> str:
+    """JLC書誌情報を整形"""
     if not data:
         return ""
     title = data.get("title", "")
@@ -143,6 +212,7 @@ def format_biblio_info(data: dict) -> str:
 
 
 def fetch_ndl_sru(pid: str) -> dict:
+    """NDL SRU APIから書誌情報を取得（JLCのフォールバック）。失敗時1回リトライ。"""
     query = f'anywhere="R100000039-I{pid}"'
     params = urllib.parse.urlencode({
         "operation": "searchRetrieve",
@@ -151,15 +221,21 @@ def fetch_ndl_sru(pid: str) -> dict:
         "query": query,
     })
     url = f"https://ndlsearch.ndl.go.jp/api/sru?{params}"
-    req = urllib.request.Request(url, headers={"Accept": "application/xml"})
-    try:
-        with urllib.request.urlopen(req, timeout=20) as response:
-            return _parse_sru_xml(response.read())
-    except Exception:
-        return {}
+    req = urllib.request.Request(
+        url, headers={"Accept": "application/xml", "User-Agent": _UA}
+    )
+    for attempt in range(2):
+        try:
+            with urllib.request.urlopen(req, timeout=20) as response:
+                return _parse_sru_xml(response.read())
+        except Exception:
+            if attempt == 0:
+                time.sleep(2)
+    return {}
 
 
 def _parse_sru_xml(xml_bytes: bytes) -> dict:
+    """SRU XMLレスポンスを解析してDC-NDL書誌情報を返す"""
     try:
         root = ET.fromstring(xml_bytes)
     except ET.ParseError:
@@ -211,6 +287,7 @@ def _parse_sru_xml(xml_bytes: bytes) -> dict:
 
 
 def format_ndl_sru_info(data: dict) -> str:
+    """NDL SRU書誌情報を整形"""
     if not data or not data.get("title"):
         return ""
     title = data["title"]

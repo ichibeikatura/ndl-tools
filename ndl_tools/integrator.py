@@ -30,16 +30,31 @@ PROMPT_TEMPLATE = """\
 - 新字体への正規化、現代仮名遣いへの変換は行わないでください
 - ルビ（振り仮名）がOCR結果に混入している場合は除去してください
 - 明らかな誤認識のみ修正し、判断できない箇所はOCR結果のうち最も信頼度の高いものを採用してください
-- 復元したテキストのみを出力してください。説明や注釈は不要です\
+{join_instruction}- 復元したテキストのみを出力してください。説明や注釈は不要です\
 """
 
+# 一括モード用の追加指示。OCRの行内改行（レイアウト由来の折り返し）を段落単位に
+# まとめ、段落境界の改行だけを残す。
+JOIN_INSTRUCTION = (
+    "- OCR結果の改行はレイアウト上の折り返しを含みます。文が続く折り返しの改行は"
+    "除去して段落単位につなげ、段落の境界（改行して新しい段落が始まる箇所）だけ"
+    "改行を残してください\n"
+)
 
-def _build_prompt(vision_text: str, google_text: str, ndlocr_text: str, biblio: str) -> str:
+
+def _build_prompt(
+    vision_text: str,
+    google_text: str,
+    ndlocr_text: str,
+    biblio: str,
+    join_lines: bool = False,
+) -> str:
     return PROMPT_TEMPLATE.format(
         biblio=biblio or "（取得できませんでした）",
         vision=vision_text or "（失敗）",
         google=google_text or "（失敗）",
         ndlocr=ndlocr_text or "（失敗）",
+        join_instruction=JOIN_INSTRUCTION if join_lines else "",
     )
 
 
@@ -99,9 +114,13 @@ def integrate(
     google_text: str,
     ndlocr_text: str,
     biblio: str = "",
+    join_lines: bool = False,
 ) -> str:
-    """3つのOCR結果をagy CLIで統合校正する。失敗時はGemini APIにフォールバック"""
-    prompt = _build_prompt(vision_text, google_text, ndlocr_text, biblio)
+    """3つのOCR結果をagy CLIで統合校正する。失敗時はGemini APIにフォールバック
+
+    join_lines=True で一括モード用に、行内改行を段落単位へ結合する指示を加える。
+    """
+    prompt = _build_prompt(vision_text, google_text, ndlocr_text, biblio, join_lines)
 
     try:
         return _integrate_via_agy(prompt)
