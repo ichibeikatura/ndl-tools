@@ -16,6 +16,7 @@ Usage:
 """
 
 import argparse
+import os
 import subprocess
 import re
 from datetime import datetime
@@ -23,7 +24,10 @@ from pathlib import Path
 from urllib.parse import unquote
 
 # === 設定 ===
-LOG_FILE = Path.home() / "My Drive" / "memo" / "readkindai.txt"
+# ndl.py と同じログに追記する。環境変数 NDL_LOG_FILE で上書きできる。
+DEFAULT_LOG_FILE = Path.home() / "My Drive" / "memo" / "readkindai.txt"
+
+LOG_FILE = Path(os.environ.get("NDL_LOG_FILE", str(DEFAULT_LOG_FILE))).expanduser()
 
 # === AppleScript（インライン実行） ===
 APPLESCRIPT_GET_DOCUMENT = '''

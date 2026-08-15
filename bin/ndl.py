@@ -10,6 +10,7 @@ Usage:
 """
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -24,8 +25,14 @@ from ndl_tools import biblio as biblio_mod
 from ndl_tools.biblio import extract_pid_and_page, get_safari_url
 
 # === 設定 ===
-LOG_FILE = Path.home() / "My Drive" / "memo" / "readkindai.txt"
-SCREENSHOT_DIR = Path.home() / "Documents" / "ebook" / "kindaimemo"
+# 既定値は環境変数 NDL_LOG_FILE / NDL_SCREENSHOT_DIR で上書きできる。
+DEFAULT_LOG_FILE = Path.home() / "My Drive" / "memo" / "readkindai.txt"
+DEFAULT_SCREENSHOT_DIR = Path.home() / "Documents" / "ebook" / "kindaimemo"
+
+LOG_FILE = Path(os.environ.get("NDL_LOG_FILE", str(DEFAULT_LOG_FILE))).expanduser()
+SCREENSHOT_DIR = Path(
+    os.environ.get("NDL_SCREENSHOT_DIR", str(DEFAULT_SCREENSHOT_DIR))
+).expanduser()
 
 # === スクリーンショット ===
 def take_screenshot(filename: str):

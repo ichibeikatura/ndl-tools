@@ -58,6 +58,14 @@ export GEMINI_API_KEY="your_api_key"                # Gemini API（agy 失敗時
 
 `~/.secrets` に書いて `~/.zshenv` から `source ~/.secrets` するのが推奨。
 
+出力先のパスも環境変数で変更できる（いずれも省略可。既定値は下記のとおり）:
+
+| 環境変数 | 用途 | 既定値 |
+|---|---|---|
+| `TRIPLE_OCR_LOG` | `triple_ocr.py` の結果ログ | `~/My Drive/memo/triple-ocr.txt` |
+| `NDL_LOG_FILE` | `ndl.py` / `preview.py` の閲覧ログ | `~/My Drive/memo/readkindai.txt` |
+| `NDL_SCREENSHOT_DIR` | `ndl.py --full` のスクショ保存先 | `~/Documents/ebook/kindaimemo` |
+
 ## Karabiner-Elements 設定
 
 グローバル起動する場合、`shell_command` に環境変数と PATH を明示する：
@@ -180,7 +188,7 @@ python3 bin/triple_ocr.py | pbpaste
 
 ## ログ
 
-結果は `~/My Drive/memo/triple-ocr.txt` に追記される（`TRIPLE_OCR_LOG` 環境変数で変更可）。
+結果は `~/My Drive/memo/triple-ocr.txt` に追記される（`TRIPLE_OCR_LOG` で変更可）。
 
 ```
 {書誌情報}
@@ -213,7 +221,8 @@ Safariが NDLデジコレを開いていない場合は警告のみ出して続�
 ### ndl.py — NDLデジコレ閲覧ログ記録
 
 Safari で開いている資料の書誌情報・URL・ページ番号を `~/My Drive/memo/readkindai.txt`
-に追記する。`--full` はスクリーンショット（`~/Documents/ebook/kindaimemo/`）も撮る。
+（`NDL_LOG_FILE` で変更可）に追記する。`--full` はスクリーンショット
+（`~/Documents/ebook/kindaimemo/`、`NDL_SCREENSHOT_DIR` で変更可）も撮る。
 
 ```bash
 python3 bin/ndl.py --page   # ページ番号のみ追記
@@ -224,9 +233,9 @@ python3 bin/ndl.py --full   # 書誌情報＋URL＋タイムスタンプ＋ペ�
 
 ### preview.py — Preview.app 閲覧ログ記録
 
-ダウンロード済み資料を Preview.app で読んでいるときの閲覧状況を記録する。
-書誌情報は資料フォルダ内の `biblio.txt` / `metadata` から読むため、
-`ndl_tools/biblio.py` には依存しない。
+ダウンロード済み資料を Preview.app で読んでいるときの閲覧状況を、`ndl.py` と同じ
+ログファイル（`NDL_LOG_FILE`）に記録する。書誌情報は資料フォルダ内の
+`biblio.txt` / `metadata` から読むため、`ndl_tools/biblio.py` には依存しない。
 
 ```bash
 python3 bin/preview.py --page
@@ -235,8 +244,7 @@ python3 bin/preview.py --full
 
 ## ~/.bin からの利用
 
-`~/.bin` は PATH に入っているため、symlink を張るとどこからでも起動できる。
-2026-08-15 に設定済み。
+`~/.bin` のような PATH の通ったディレクトリに symlink を張ると、どこからでも起動できる。
 
 ```bash
 ln -sf ~/Documents/github/ndl-tools/bin/ndl.py     ~/.bin/ndl.py
@@ -253,3 +261,9 @@ Karabiner の `Cmd+Shift+P` / `Cmd+Shift+M` は `~/.bin/ndl.py`・`~/.bin/previe
 - [ndl-note-tag](https://github.com/ichibeikatura/ndl-note-tag) — 書誌メモのタグ付け
 - [kreplace](https://github.com/ichibeikatura/kreplace) — Emacs の旧字新字変換（`ndl_tools/kyujitai.py` の変換表の出典）
 - [proofreader.el](https://github.com/ichibeikatura/proofreader.el) — agy による校正（本ツールの後段で使う）
+
+## ライセンス
+
+MIT License（[LICENSE](LICENSE)）。
+
+`ndl_tools/kyujitai.py` の旧字新字変換表は [kreplace](https://github.com/ichibeikatura/kreplace) から移植したもの。
