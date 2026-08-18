@@ -18,9 +18,12 @@
 
 目次終マーカーが見つからない資料では前付け・本文の境界が判定できず
 誤削除の危険があるため、重複した「目次」見出しの除去以外は何もしない。
+ただし `--join-without-marker` を付けると、除去は行わないまま段落結合だけを
+実行する（ページ境界の空行と行長・終端記号だけで判定する保守的な経路）。
 
 usage: clean_hashira.py [-o OUT] [--title T] [--max-page N]
                         [--toc-end M] [--colophon M] [--no-join]
+                        [--join-without-marker] [--min-join-len N]
                         [--report FILE] input.txt
 """
 
@@ -36,6 +39,13 @@ KAN = {"〇": 0, "一": 1, "二": 2, "三": 3, "四": 4,
 KAN_CHARS = set(KAN) | {"十"}
 SENT_END = "。』」！？!?"
 CHAPTER_RE = re.compile(r"第[一二三四五六七八九十]+.{2,14}")
+
+# マーカー無しモード（--join-without-marker）専用の判定材料。
+# 目次終・奥附が無い資料では範囲を絞れないため、SENT_END より広い終端記号と
+# 行頭記号、および行長で「ページ跨ぎの途中切れ」だけを拾う。
+LOOSE_END = SENT_END + "）)】…―ー"      # これで終わる行は文が閉じている
+LOOSE_START = "「『（(【〔《〈０１２３４５６７８９0123456789"  # これで始まる行は新ブロック
+LOOSE_MIN_LEN = 30                      # 前後ともこの字数以上のときだけ結合
 
 
 def norm(s: str) -> str:
@@ -105,6 +115,13 @@ def main():
                     help="奥附・巻末広告の開始マーカーまたは行番号（既定: 奥附）")
     ap.add_argument("--no-join", action="store_true",
                     help="分断された段落の結合を行わない")
+    ap.add_argument("--join-without-marker", action="store_true",
+                    help="目次終マーカーが無い資料でも段落結合だけは行う"
+                         "（柱・ノンブルの除去は従来どおり行わない）")
+    ap.add_argument("--min-join-len", type=int, default=LOOSE_MIN_LEN,
+                    metavar="N",
+                    help=f"マーカー無し結合で前後の行に要求する最小字数"
+                         f"（既定: {LOOSE_MIN_LEN}）")
     ap.add_argument("--report", type=Path, help="除去した行の一覧の出力先")
     args = ap.parse_args()
 
@@ -117,10 +134,14 @@ def main():
     max_page = args.max_page or detect_max_page(args.input) or 500
 
     if toc_end is None:
-        print(f"警告: 目次終マーカー '{args.toc_end}' が見つかりません。"
-              "前付け・本文の境界を判定できないため、柱・ノンブルの除去と"
-              "段落結合は行いません（--toc-end で行番号を指定できます）",
-              file=sys.stderr)
+        msg = (f"警告: 目次終マーカー '{args.toc_end}' が見つかりません。"
+               "前付け・本文の境界を判定できないため、柱・ノンブルの除去は"
+               "行いません（--toc-end で行番号を指定できます）")
+        if args.join_without_marker:
+            msg += "。--join-without-marker により段落結合のみ行います"
+        else:
+            msg += "。段落結合も行いません（--join-without-marker で結合のみ可）"
+        print(msg, file=sys.stderr)
     if title is None:
         print("警告: 書名を特定できないため、書名の柱は除去しません"
               "（--title で指定できます）", file=sys.stderr)
@@ -193,18 +214,43 @@ def main():
     # 対象は目次終〜奥附の本文のみ。前付け（漢詩・序）と巻末（奥附・広告）は
     # 短い行そのものが単位なので結合しない。本文の段落は必ず 。』」等で
     # 終わるため、そうでない行はページ跨ぎの途中切れと判断できる。
+    #
+    # マーカーが無い資料では上記の範囲判定ができないため、--join-without-marker
+    # のときだけ別経路を使う。triple_ocr.py --dir はページを空行で連結するので、
+    # ページ跨ぎの切れ目は必ず「空行を挟んだ長い行どうし」になる。そこで
+    #   ・直前に空行がある（＝ページ境界か段落境界）
+    #   ・前後とも --min-join-len 字以上（見出し・柱・短い引用行を除外）
+    #   ・前の行が LOOSE_END で終わらない（＝文が閉じていない）
+    #   ・後の行が LOOSE_START で始まらない（＝引用・箇条書きの開始ではない）
+    # の全てを満たす場合だけ結合する。範囲を絞らないぶん条件を厳しくしている。
     out = []          # [(行番号, 本文, 直前に空行があったか)]
     joins = 0
     pending_blank = False
     join_enabled = not args.no_join and toc_end is not None
+    loose_enabled = (not args.no_join and toc_end is None
+                     and args.join_without_marker)
     for orig, text in kept:
         if not text.strip():
             pending_blank = True
             continue
+        prev = out[-1][1].rstrip() if out else ""
+        cur = text.strip()
         if (join_enabled and out and toc_end < orig < colophon
                 and out[-1][0] > toc_end
-                and out[-1][1].rstrip()[-1] not in SENT_END
+                and prev[-1] not in SENT_END
                 and not is_heading(text) and not is_heading(out[-1][1])):
+            join_here = True
+        elif (loose_enabled and out and pending_blank
+                and len(prev) >= args.min_join_len
+                and len(cur) >= args.min_join_len
+                and prev[-1] not in LOOSE_END
+                and cur[0] not in LOOSE_START
+                and not is_heading(text) and not is_heading(out[-1][1])):
+            join_here = True
+        else:
+            join_here = False
+
+        if join_here:
             joins += 1
             out[-1] = (out[-1][0], out[-1][1].rstrip() + text.lstrip(),
                        out[-1][2])
