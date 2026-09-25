@@ -211,6 +211,27 @@ def _pid_from_dirname(dir_path: Path) -> str:
     return m.group(1) if m else ""
 
 
+# 一括モードのページ単位の中間ファイル置き場（対象ディレクトリ直下）。
+# モードごとにサブフォルダを分け、統合校正の結果と --ocr-only 等の結果が混ざらないようにする。
+BATCH_PAGES_DIR = "_pages"
+
+
+def _batch_mode(args) -> str:
+    """中間ファイルのサブフォルダ名に使うモード名。"""
+    if args.engine:
+        return f"engine-{args.engine}"
+    if args.ocr_only:
+        return "ocr-only"
+    return "integrated"
+
+
+def _write_page_cache(path: Path, text: str):
+    """中断で書きかけのファイルが残らないよう、一時ファイル経由で置き換える。"""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
+
 def run_batch(dir_path: Path, args) -> int:
     """ディレクトリ内の画像を一括でOCR→agy統合→旧字新字変換し、honmon.txt に書き出す。"""
     from ndl_tools import kyujitai
@@ -238,8 +259,21 @@ def run_batch(dir_path: Path, args) -> int:
         else:
             eprint("[書誌] PID を特定できませんでした（--pid で指定できます）。")
 
+    # 処理済みページは中間ファイルから読み込み、続きから再開する。
+    # 特定ページをやり直すときは該当の .txt を消して再実行する。
+    cache_dir = dir_path / BATCH_PAGES_DIR / _batch_mode(args)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cached = sum(1 for image in images if (cache_dir / f"{image.stem}.txt").exists())
+    if cached:
+        eprint(f"[一括] 処理済み {cached} 枚をスキップします（{cache_dir}）")
+
     pages: list[str] = []
     for i, image in enumerate(images, 1):
+        cache_path = cache_dir / f"{image.stem}.txt"
+        if cache_path.exists():
+            pages.append(cache_path.read_text(encoding="utf-8"))
+            continue
+
         eprint(f"\n[{i}/{len(images)}] {image.name}")
         ocr_results = run_ocr(str(image), only=args.engine or "")
         successful = [name for name, text in ocr_results.items() if text]
@@ -248,6 +282,8 @@ def run_batch(dir_path: Path, args) -> int:
             continue
         eprint(f"[{i}/{len(images)}] OCR成功: {', '.join(successful)}")
 
+        # 校正に失敗したページは中間ファイルを残さず、再実行時に校正し直す
+        cacheable = True
         if args.ocr_only or args.engine:
             page_text = _raw_ocr_text(ocr_results, labeled=False)
         else:
@@ -263,8 +299,12 @@ def run_batch(dir_path: Path, args) -> int:
             except Exception as e:
                 eprint(f"[{i}/{len(images)}] 校正失敗: {e} — OCR結果をそのまま採用します")
                 page_text = _raw_ocr_text(ocr_results, labeled=False)
+                cacheable = False
 
-        pages.append(kyujitai.to_shinjitai(page_text.strip()))
+        page_text = kyujitai.to_shinjitai(page_text.strip())
+        if cacheable:
+            _write_page_cache(cache_path, page_text)
+        pages.append(page_text)
 
     if not pages:
         eprint("[エラー] 全ページの処理に失敗しました。")
@@ -298,7 +338,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--image", metavar="PATH", help="スクショ済みの画像ファイルを指定（省略時はインタラクティブ撮影）")
-    parser.add_argument("--dir", metavar="PATH", help="ディレクトリ内の画像(.png/.jpg/.jpeg)を一括OCRし honmon.txt に出力（旧字→新字変換・段落結合あり）")
+    parser.add_argument("--dir", metavar="PATH", help="ディレクトリ内の画像(.png/.jpg/.jpeg)を一括OCRし honmon.txt に出力（旧字→新字変換・段落結合あり。ページごとに _pages/ へ保存し、再実行時は続きから）")
     parser.add_argument("--pid", metavar="PID", help="書誌情報のPIDを明示指定（一括モードで既定はディレクトリ名の先頭数字）")
     parser.add_argument("--no-biblio", action="store_true", help="書誌情報の取得をスキップ")
     parser.add_argument("--no-clipboard", action="store_true", help="クリップボードへのコピーをスキップ")
