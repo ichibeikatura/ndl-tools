@@ -1,0 +1,20 @@
+__pycache__/
+*.pyc
+.DS_Store
+/tmp/
+/copy
+/out/
+test.png
+/.venv/
+/.zellij-send/
+triple-ocr-agy-migration-instructions.md
+
+# 作業環境のローカル設定・内部メモ（公開しない）
+.claude/
+CLAUDE.md
+
+# 一括OCRの成果物（画像・honmon.txt）はリポジトリに入れない
+/[0-9]*_[0-9]*/
+honmon.txt
+honmon.clean.txt
+_pages/
