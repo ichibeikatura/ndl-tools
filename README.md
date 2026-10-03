@@ -39,6 +39,7 @@ Safari から NDLデジコレの書誌情報を自動取得
 - macOS（Apple Silicon 推奨）
 - Python 3.10+
 - [ndlocr-lite](https://github.com/ndl-lab/ndlocr_cli)（`uv tool install` 等でインストール済みであること）
+- poppler（`brew install poppler`。PDF のテキスト化で `pdfinfo` / `pdfimages` / `pdftotext` / `pdftoppm` を使う）
 - [agy（Antigravity CLI）](https://antigravity.dev)（主経路の統合校正に使用）
   - Gemini AI Pro 等のサブスクリプションが必要
   - 初回起動時にブラウザ OAuth 認証が必要（`agy` を単体で起動すると自動で案内される）
@@ -100,6 +101,7 @@ ndl-tools/
     ├── biblio.py         # 書誌情報取得（Safari連携 / JLC / NDL SRU）
     ├── integrator.py     # agy 統合校正（Gemini API フォールバック付き）
     ├── kyujitai.py       # 旧字体→新字体 変換（kreplace 変換表を移植）
+    ├── pdf.py            # PDF のページ判定（スキャン / テキスト層）・抽出・画像化
     ├── ocr_vision.py     # macOS Vision OCR
     ├── ocr_google.py     # Google Cloud Vision OCR
     └── ocr_ndlocr.py     # ndlocr-lite OCR
@@ -127,7 +129,8 @@ python3 bin/triple_ocr.py [-h] [--image PATH] [--dir [PATH]] [--pages SPEC]
                           [--model NAME] [--engine ENGINE]
 
 --image PATH     スクショ済みの画像ファイルを指定（省略時はインタラクティブ撮影）
---dir [PATH]     ディレクトリ内の画像(.png/.jpg/.jpeg)を一括OCRし honmon.txt に出力（省略時は .）
+--dir [PATH]     ディレクトリ内の画像(.png/.jpg/.jpeg)を一括OCRし honmon.txt に出力（省略時は .）。
+                 PDF は1ファイルずつ <PDF名>.txt に出力
 --pages SPEC     一括モードで扱うコマ番号（例: 10-25, 3,5,10-12）。出力は honmon_p10-25.txt のような
                  範囲付きの名前になる
 --pid PID        書誌情報のPIDを明示指定（一括モードで既定は書棚の metadata かディレクトリ名の先頭数字）
@@ -201,6 +204,19 @@ cd ~/Documents/ebook/kindai/2026/"出版者 書名" && triple_ocr.py --dir   # �
 - **書棚レイアウト**: 1冊を1ディレクトリにまとめ、画像を `original/` に置き、`metadata`（`https://dl.ndl.go.jp/pid/{pid}` を1行）と `biblio.txt` を並べた構成にも対応する。本のディレクトリ（`original/` の親）を1冊の単位にし、本のディレクトリと `original/` のどちらを渡しても、`original/` の画像を読み、`honmon.txt` と `_pages/` は本のディレクトリ直下に置く。PID は `metadata` から取る。
 - **ページ指定（`--pages`）**: `--pages 10-25`（`3,5,10-12` のようにも書ける）で、ファイル名（`0010.jpg` 等）の番号が範囲に入る画像だけを処理する。番号でない名前の画像は対象外。出力は `honmon_p10-25.txt` のように範囲付きの名前にして、範囲を変えて実行しても前の結果を上書きしない（`_pages/` はページ単位なので範囲をまたいで再利用される）。
 - **PATH の省略**: `--dir` だけならカレントディレクトリが対象。本のディレクトリに `cd` して `triple_ocr.py --dir` と打てばよい。
+
+#### PDF
+
+`--dir` に渡したディレクトリの直下にある PDF（`.pdf`）は、1ファイルずつテキスト化して同じ場所に `<PDF名>.txt` として書き出す（`論文.pdf` → `論文.txt`）。画像も置いてあれば、画像は従来どおり `honmon.txt` にまとめ、PDF とは別に出力する。
+
+ページごとに次のどちらかに振り分ける:
+
+- **スキャンページ**（ページ面積の半分以上を覆う画像がある）: 300dpi の PNG にして、画像と同じ三系統OCR→agy統合校正に回す。Acrobat の Paper Capture 等で付いた OCR テキスト層は品質が低い（縦書きが崩れる等）ので使わない。全面画像もテキストも無いページもこちらに回す。
+- **テキスト層のページ**（最初からデジタルで作られた PDF）: `pdftotext -raw` で抜き出し、agy に段組・囲み記事の読む順序だけを整えさせる（文字の追加・削除・置き換えはさせない）。`--ocr-only` / `--engine` 指定時は並べ替えずに抜き出したまま使う。
+
+- 段落結合・旧字体→新字体変換・途中再開は画像の一括モードと同じ。途中結果は `_pages/<モード>/<PDF名>/<ページ番号>.txt` に置く。
+- `--pages` は PDF のページ番号で絞り込み、出力は `<PDF名>_p10-25.txt` になる。
+- NDL デジコレの資料ではないので、書誌情報は取得しない（`--pid` を指定したときだけ取得する）。
 
 ### 柱（ランニングヘッダ）の除去
 

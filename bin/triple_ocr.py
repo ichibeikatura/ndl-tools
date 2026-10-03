@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -20,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ndl_tools import biblio as biblio_mod
 from ndl_tools import integrator, ocr_google, ocr_ndlocr, ocr_vision
+from ndl_tools import pdf as pdf_mod
 
 # ログファイルのデフォルトパス。環境変数 TRIPLE_OCR_LOG で上書き可能。
 DEFAULT_LOG = Path.home() / "My Drive" / "memo" / "triple-ocr.txt"
@@ -219,6 +221,10 @@ def _list_images(dir_path: Path) -> list[Path]:
     )
 
 
+def _list_pdfs(dir_path: Path) -> list[Path]:
+    return sorted(p for p in dir_path.iterdir() if p.is_file() and p.suffix.lower() == ".pdf")
+
+
 def _parse_pages(spec: str) -> set[int]:
     """"10-25" や "3,5,10-12" をコマ番号（1始まり）の集合にする。"""
     pages: set[int] = set()
@@ -412,6 +418,28 @@ def _write_honmon(out_dir: Path, biblio_text: str, pages: list[str], name: str =
 
 
 def run_batch(dir_path: Path, args) -> int:
+    """ディレクトリ内の画像と PDF を一括でテキスト化する。
+
+    画像はまとめて honmon.txt に、PDF は1ファイルずつ <PDF名>.txt に（PDF と同じ場所へ）書き出す。
+    agy の利用上限に達したら、残りのファイルも処理せずに止める。
+    """
+    pdfs = _list_pdfs(dir_path)
+    image_dir, _ = _resolve_batch_dirs(dir_path)
+    # PDF だけのディレクトリでは画像の一括処理を飛ばす（画像が無いというエラーを出さない）
+    run_images = not pdfs or bool(_list_images(image_dir))
+
+    status = 0
+    try:
+        if run_images:
+            status = max(status, _run_images(dir_path, args))
+        for pdf_path in pdfs:
+            status = max(status, _run_pdf(pdf_path, args))
+    except integrator.AgyQuotaError:
+        return 1
+    return status
+
+
+def _run_images(dir_path: Path, args) -> int:
     """ディレクトリ内の画像を一括でOCR→agy統合→旧字新字変換し、honmon.txt に書き出す。"""
     image_dir, out_dir = _resolve_batch_dirs(dir_path)
     if out_dir != image_dir and (image_dir / BATCH_PAGES_DIR).is_dir():
@@ -446,9 +474,100 @@ def run_batch(dir_path: Path, args) -> int:
         if pages:
             eprint(f"[停止] {len(images)} 枚中 {len(pages)} ページまでで {_honmon_name(args)} を書き出します。")
             _write_honmon(out_dir, biblio_text, pages, _honmon_name(args))
-        return 1
+        raise
 
     return _write_honmon(out_dir, biblio_text, pages, _honmon_name(args))
+
+
+def _pdf_output_name(pdf_path: Path, args) -> str:
+    """PDF と同じ名前で拡張子を .txt にする（--pages 指定時は 名前_p10-25.txt）。"""
+    suffix = f"_p{_format_pages(args.pages)}" if args.pages else ""
+    return f"{pdf_path.stem}{suffix}.txt"
+
+
+def _pdf_text_page(pdf_path: Path, page: int, label: str, cache_dir: Path, biblio_text: str, args) -> str:
+    """テキスト層のあるページを抜き出し、agy で読む順序だけ整える（文字は変えさせない）。"""
+    from ndl_tools import kyujitai
+
+    cache_path = cache_dir / f"{page:04d}.txt"
+    if cache_path.exists():
+        return cache_path.read_text(encoding="utf-8")
+
+    eprint(f"\n[{label}] p{page}（テキスト層）")
+    text = pdf_mod.extract_text(pdf_path, page)
+
+    # 並べ替えに失敗したページは中間ファイルを残さず、再実行時にやり直す
+    cacheable = True
+    if not (args.ocr_only or args.engine):
+        try:
+            text = integrator.reorder(text, biblio=biblio_text, join_lines=True, model=args.model)
+            eprint(f"[{label}] 並べ替え完了")
+        except integrator.AgyQuotaError:
+            raise
+        except Exception as e:
+            eprint(f"[{label}] 並べ替え失敗: {e} — 抽出テキストをそのまま採用します")
+            cacheable = False
+
+    text = kyujitai.to_shinjitai(text.strip())
+    if cacheable:
+        _write_page_cache(cache_path, text)
+    return text
+
+
+def _run_pdf(pdf_path: Path, args) -> int:
+    """PDF を1ページずつテキスト化して <PDF名>.txt に書き出す。
+
+    スキャンページ（全面画像あり）は既存の OCR テキスト層を使わず、画像にして三系統OCR→agy統合。
+    テキスト層のページは抜き出して agy で読む順序を整える。
+    途中結果は _pages/<モード>/<PDF名>/<ページ番号>.txt に保存し、再実行時は続きから。
+    書誌情報は NDL の資料ではないので既定で取得しない（--pid を明示したときだけ取得する）。
+    """
+    try:
+        kinds = pdf_mod.classify_pages(pdf_path)
+    except Exception as e:
+        eprint(f"[エラー] {pdf_path.name} を読めません: {e}")
+        return 1
+    if args.pages:
+        kinds = [(n, kind) for n, kind in kinds if n in args.pages]
+        if not kinds:
+            eprint(f"[エラー] {pdf_path.name} に --pages {_format_pages(args.pages)} のページがありません。")
+            return 1
+    n_scan = sum(1 for _, kind in kinds if kind == "scan")
+    eprint(f"\n[PDF] {pdf_path.name}: {len(kinds)} ページ（スキャン {n_scan} / テキスト層 {len(kinds) - n_scan}）")
+
+    biblio_text = _fetch_batch_biblio(args.pid, args) if args.pid else ""
+
+    cache_dir = _page_cache_dir(pdf_path.parent, args) / pdf_path.stem
+    cache_dir.mkdir(exist_ok=True)
+    cached = sum(1 for n, _ in kinds if (cache_dir / f"{n:04d}.txt").exists())
+    if cached:
+        eprint(f"[PDF] 処理済み {cached} ページをスキップします（{cache_dir}）")
+
+    name = _pdf_output_name(pdf_path, args)
+    pages: list[str] = []
+    with tempfile.TemporaryDirectory(prefix="triple_ocr_pdf_") as tmp:
+        try:
+            for i, (n, kind) in enumerate(kinds, 1):
+                label = f"{pdf_path.stem} {i}/{len(kinds)}"
+                if kind == "text":
+                    page_text = _pdf_text_page(pdf_path, n, label, cache_dir, biblio_text, args)
+                elif (cache_dir / f"{n:04d}.txt").exists():
+                    page_text = (cache_dir / f"{n:04d}.txt").read_text(encoding="utf-8")
+                else:
+                    # 画像名（0001.png）の stem が _ocr_page の中間ファイル名になる
+                    image = pdf_mod.render_page(pdf_path, n, Path(tmp))
+                    page_text = _ocr_page(image, label, cache_dir, biblio_text, args)
+                    image.unlink(missing_ok=True)
+                if page_text is not None:
+                    pages.append(page_text)
+        except integrator.AgyQuotaError as e:
+            eprint(_quota_message(e))
+            if pages:
+                eprint(f"[停止] {len(kinds)} ページ中 {len(pages)} ページまでで {name} を書き出します。")
+                _write_honmon(pdf_path.parent, biblio_text, pages, name)
+            raise
+
+    return _write_honmon(pdf_path.parent, biblio_text, pages, name)
 
 
 def copy_to_clipboard(text: str):
@@ -470,12 +589,14 @@ def main():
         "--dir", metavar="PATH", nargs="?", const=".",
         help="ディレクトリ内の画像(.png/.jpg/.jpeg)を一括OCRし honmon.txt に出力（旧字→新字変換・段落結合あり。"
              "ページごとに _pages/ へ保存し、再実行時は続きから）。PATH 省略時はカレントディレクトリ。"
-             "画像が original/ にある書棚レイアウトでは、本のディレクトリと original/ のどちらを渡しても本のディレクトリ直下に出力",
+             "画像が original/ にある書棚レイアウトでは、本のディレクトリと original/ のどちらを渡しても本のディレクトリ直下に出力。"
+             "PDF は1ファイルずつ <PDF名>.txt に出力（スキャンページはOCR、テキスト層のあるページは抜き出して読む順序を整える。"
+             "書誌情報は --pid 指定時のみ）",
     )
     parser.add_argument(
         "--pages", metavar="SPEC",
         help="一括モード（--dir）で扱うコマ番号（1始まり。例: 10-25, 3,5,10-12）。ファイル名（0010.jpg 等）の"
-             "番号で絞り込み、出力は honmon_p10-25.txt のような範囲付きの名前になる",
+             "番号で絞り込み、出力は honmon_p10-25.txt のような範囲付きの名前になる。PDF ではページ番号で絞り込む",
     )
     parser.add_argument("--pid", metavar="PID", help="書誌情報のPIDを明示指定（一括モードで既定は書棚の metadata かディレクトリ名の先頭数字）")
     parser.add_argument("--no-biblio", action="store_true", help="書誌情報の取得をスキップ")

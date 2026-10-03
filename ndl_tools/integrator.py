@@ -43,6 +43,25 @@ JOIN_INSTRUCTION = (
 )
 
 
+# PDF のテキスト層（最初からデジタルで作られた PDF）用。文字は正しいので、段組で乱れた
+# 読む順序だけを直させる。
+REORDER_TEMPLATE = """\
+以下は、日本語資料のPDF（1ページ分）のテキスト層から抽出したテキストです。
+文字そのものは正確ですが、段組や囲み記事のため、行の並ぶ順序が乱れていることがあります。
+
+## 書誌情報
+{biblio}
+
+## 抽出テキスト
+{text}
+
+## 指示
+- 段組・見出し・囲み記事などのレイアウトを推定し、人が読む順序に行を並べ替えてください
+- 文字の追加・削除・置き換えは一切行わないでください（誤字や表記揺れもそのまま残してください）
+{join_instruction}- 並べ替えたテキストのみを出力してください。説明や注釈は不要です\
+"""
+
+
 def _build_prompt(
     vision_text: str,
     google_text: str,
@@ -192,7 +211,28 @@ def integrate(
     model は agy に渡すモデルの表示名（resolve_agy_model() で解決したもの）。
     """
     prompt = _build_prompt(vision_text, google_text, ndlocr_text, biblio, join_lines)
+    return _run_prompt(prompt, model)
 
+
+def reorder(
+    text: str,
+    biblio: str = "",
+    join_lines: bool = False,
+    model: str = MODEL_AGY,
+) -> str:
+    """PDF のテキスト層から抜いたテキストの読む順序を agy で整える（文字は変えさせない）。
+
+    失敗時のフォールバックと利用上限の扱いは integrate() と同じ。
+    """
+    prompt = REORDER_TEMPLATE.format(
+        biblio=biblio or "（なし）",
+        text=text,
+        join_instruction=JOIN_INSTRUCTION.replace("OCR結果", "抽出テキスト") if join_lines else "",
+    )
+    return _run_prompt(prompt, model)
+
+
+def _run_prompt(prompt: str, model: str) -> str:
     try:
         return _integrate_via_agy(prompt, model)
     except AgyQuotaError:
